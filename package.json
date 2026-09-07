@@ -1,0 +1,7 @@
+{
+  "name": "codex-usage-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Codex usage sampler and dashboard",
+  "scripts": { "start": "node server.js", "test": "node --test server.test.js" }
+}

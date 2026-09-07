@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex 账号用量</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">OPENAI CODEX · ACCOUNT MONITOR</div>
+        <h1>账号用量</h1>
+        <p class="sub">分账号记录 Codex 订阅额度，切换凭据也不会混淆历史。</p>
+      </div>
+      <div class="header-actions">
+        <button id="refreshAll" class="button secondary">刷新全部</button>
+        <button id="adminLogin" class="button secondary">管理员登录</button><button id="adminLogout" class="button secondary" hidden>退出管理员</button>
+        <button id="addAccount" class="button primary" data-admin-only hidden>添加账号</button>
+      </div>
+    </header>
+
+    <section class="summary-grid" aria-label="总览">
+      <article class="summary-card"><span class="summary-label">维护账号</span><strong id="accountCount">0</strong><span class="summary-note">个账号</span></article>
+      <article class="summary-card"><span class="summary-label">正常连接</span><strong id="healthyCount">0</strong><span class="summary-note">个账号可查询</span></article>
+      <article class="summary-card accent"><span class="summary-label">最高使用率</span><strong id="maxUsage">—</strong><span class="summary-note" id="maxUsageName">暂无数据</span></article>
+    </section>
+
+    <section class="toolbar panel">
+      <div class="field"><label for="range">历史范围</label><select id="range"><option value="1" selected>最近 24 小时</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="all">全部</option></select></div>
+      <div class="field"><label for="accountFilter">图表账号</label><select id="accountFilter"><option value="all">全部账号</option></select></div>
+      <div class="field"><label for="chartScale">纵轴范围</label><select id="chartScale"><option value="adaptive" selected>自适应</option><option value="full">完整 0%～100%</option></select></div>
+      <div class="connection"><span id="connectionDot" class="dot"></span><span id="statusText">正在读取…</span></div>
+    </section>
+
+    <section class="section-heading"><div><h2>账号</h2><p>每个账号使用独立凭据和历史快照。</p></div><button id="settings" class="text-button" data-admin-only hidden>自动查询设置</button></section>
+    <section id="accounts" class="accounts-grid"></section>
+
+    <section class="chart-card panel">
+      <div class="chart-head"><div><h2>使用变化</h2><p>记录点：<span id="count">0</span> · 账户窗口使用率</p></div><div id="legend" class="legend"></div></div>
+      <div id="chart" class="chart"><div class="empty">添加账号并完成第一次查询后，这里会显示历史曲线。</div></div>
+    </section>
+
+    <footer><span>数据仅保存在本机 <code>data/accounts.json</code> 与 <code>data/snapshots.json</code></span><span>自动查询：<b id="autoState">开启</b></span></footer>
+  </main>
+
+  <dialog id="accountDialog" class="dialog">
+    <form id="accountForm" method="dialog">
+      <div class="dialog-head"><div><span class="eyebrow">ACCOUNT PROFILE</span><h2 id="dialogTitle">添加账号</h2></div><button type="button" id="closeDialog" class="icon-button" aria-label="关闭">×</button></div>
+      <input type="hidden" id="accountId">
+      <label class="form-field"><span>账号名称</span><input id="accountName" required maxlength="80" placeholder="例如：个人 Pro、工作账号"></label>
+      <label class="form-field"><span>auth.json JSON 内容</span><textarea id="credentials" placeholder="粘贴该账号 auth.json 的完整 JSON 内容"></textarea></label>
+      <p class="form-help">凭据会由本地后端按账号单独保存，网页不会展示或回填 token。编辑已有账号时留空表示保留原凭据。</p>
+      <label class="switch-row"><input type="checkbox" id="accountEnabled" checked><span>参与自动查询</span></label>
+      <div class="dialog-actions"><button type="button" id="cancelDialog" class="button secondary">取消</button><button type="submit" class="button primary">保存账号</button></div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
