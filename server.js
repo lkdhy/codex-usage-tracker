@@ -11,6 +11,7 @@ const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const ACCOUNT_DATA_DIR = path.join(DATA_DIR, 'accounts');
 const MAX_SNAPSHOTS_PER_ACCOUNT = 20000;
 const MAX_BODY_BYTES = 1024 * 1024;
+const USAGE_ENDPOINT = 'https://chatgpt.com/backend-api/wham/usage';
 const ADMIN_PASSWORD = process.env.CODEX_ADMIN_PASSWORD || '';
 const adminSessions = new Map();
 
@@ -39,7 +40,35 @@ function writeJson(file, value) {
 function requestError(message, statusCode = 502, code = 'UPSTREAM_ERROR') {
   return Object.assign(new Error(message), { statusCode, code });
 }
+function errorText(error) {
+  if (!error) return '未知错误';
+  if (error.name === 'AggregateError') return `聚合错误：${[...error.errors || []].map(errorText).join('；')}`;
+  let message = error.message || String(error);
+  if (error.cause) {
+    const cause = errorText(error.cause);
+    if (cause && !message.includes(cause)) message += `（原因：${cause}）`;
+  }
+  return message;
+}
+function logTime() {
+  const now = new Date();
+  const pad = (value, size = 2) => String(value).padStart(size, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}`;
+}
+function logInfo() {
+  try { console.log(logTime(), '[INFO]', ...Array.from(arguments, String)); } catch { /* stdout 不可用不应影响服务 */ }
+}
+function logWarn() {
+  try { console.warn(logTime(), '[WARN]', ...Array.from(arguments, String)); } catch { /* stderr 不可用不应影响服务 */ }
+}
 function newId() { return crypto.randomUUID(); }
+// 只保留请求方法和路径：查询串可能带 token，不写入日志。
+function requestLine(req) {
+  let pathname = String(req.url || '/');
+  try { pathname = new URL(pathname, 'http://127.0.0.1').pathname; }
+  catch { pathname = pathname.split(/[?#]/)[0]; }
+  return `${req.method} ${pathname}`;
+}
 function credentialPath(account) { return path.join(ACCOUNT_DATA_DIR, `${account.id}.json`); }
 function tokenFromCredentials(value) { return value?.access_token || value?.tokens?.access_token; }
 function parseCredentials(input) {
@@ -250,14 +279,18 @@ async function pollAccount(id) {
   const account = accountById(id);
   if (!account) throw new Error('账号不存在');
   if (activePolls.has(id)) throw new Error('该账号正在查询，请稍候');
+  let requested = false;
   const auth = readAuth(account);
   if (!auth.token) {
     account.lastError = null;
     account.lastErrorCode = null;
     saveAccounts();
+    logWarn(`未发起请求 ${account.name}：本地没有可用 access_token，GET ${USAGE_ENDPOINT} 未调用`);
     throw requestError('尚未设置有效凭据，请在编辑账号中粘贴 auth.json 的 JSON 内容', 400, 'CREDENTIALS_MISSING');
   }
   activePolls.add(id);
+  requested = true;
+  logInfo(`发起请求 ${account.name}：GET ${USAGE_ENDPOINT}${auth.account ? ' · 附带 ChatGPT-Account-ID' : ''}`);
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1, config.timeoutSeconds) * 1000);
@@ -270,11 +303,12 @@ async function pollAccount(id) {
       if (auth.account) headers['ChatGPT-Account-ID'] = auth.account;
       let response;
       try {
-        response = await fetch('https://chatgpt.com/backend-api/wham/usage', { headers, signal: controller.signal });
+        response = await fetch(USAGE_ENDPOINT, { headers, signal: controller.signal });
       } catch (error) {
         if (error.name === 'AbortError') throw error;
         throw requestError('无法连接用量接口，请检查网络后重试', 502, 'UPSTREAM_NETWORK');
       }
+      logInfo(`调用接口 GET ${USAGE_ENDPOINT} → ${response.status}`);
       if (!response.ok) {
         const errors = {
           401: ['登录凭据已失效，请编辑账号并粘贴新的 auth.json', 'AUTH_EXPIRED'],
@@ -296,10 +330,11 @@ async function pollAccount(id) {
       }
       let raw;
       try { raw = JSON.parse(body); }
-      catch { throw requestError('用量接口返回的不是有效 JSON，可能为登录页或接口已变化', 502, 'UPSTREAM_FORMAT'); }
+      catch { throw requestError(`用量接口返回的不是有效 JSON（响应 ${body.length} 字节，可能为登录页或接口已变化）`, 502, 'UPSTREAM_FORMAT'); }
       const item = normalize(raw, account);
       const remoteAccountId = raw.account_id || auth.account || null;
       if (account.remoteAccountId && remoteAccountId && account.remoteAccountId !== remoteAccountId) {
+        // 不提升为 requestError：保持该分支原有的 HTTP 500 行为不变，只调整日志措辞。
         throw new Error(`凭据对应的账号已变化（原账号 ${account.remoteAccountId.slice(0, 8)}…，现为 ${remoteAccountId.slice(0, 8)}…），为避免混入历史数据，本次未保存。`);
       }
       if (!account.remoteAccountId && remoteAccountId) account.remoteAccountId = remoteAccountId;
@@ -310,6 +345,7 @@ async function pollAccount(id) {
       account.lastErrorCode = null;
       saveAccounts();
       saveSnapshots();
+      logInfo(`已记录快照：GET ${USAGE_ENDPOINT} 返回 200 · 使用率 ${item.primary ? `${item.primary.usedPercent}%` : '未知'} · 该账号 ${snapshots.filter(entry => entry.accountId === account.id).length} 条`);
       return item;
     } finally {
       clearTimeout(timer);
@@ -319,6 +355,7 @@ async function pollAccount(id) {
     account.lastError = error.message;
     account.lastErrorCode = error.code || 'POLL_FAILED';
     saveAccounts();
+    if (requested) logWarn(`请求失败 ${account.name}：GET ${USAGE_ENDPOINT} · ${errorText(error)} [${account.lastErrorCode}]`);
     throw error;
   } finally {
     activePolls.delete(id);
@@ -337,10 +374,26 @@ async function pollAll() {
       results.push({ accountId: account.id, skipped: true, reason: 'CREDENTIALS_MISSING' });
       continue;
     }
-    try { results.push({ accountId: account.id, snapshot: await pollAccount(account.id) }); }
-    catch (error) { results.push({ accountId: account.id, error: error.message }); }
+    const startedAt = Date.now();
+    try {
+      results.push({ accountId: account.id, snapshot: await pollAccount(account.id) });
+      logInfo(`采样成功 ${account.name}：耗时 ${Date.now() - startedAt}ms`);
+    } catch (error) {
+      // 失败详情已在 pollAccount 内记录，这里不重复打印，只汇总到本轮结果。
+      results.push({ accountId: account.id, error: error.message });
+    }
   }
   return results;
+}
+function pollSummary(results) {
+  const succeeded = results.filter(item => item.snapshot).length;
+  const skipped = results.filter(item => item.skipped).length;
+  const failures = results.filter(item => item.error);
+  const parts = [`成功 ${succeeded}`];
+  if (skipped) parts.push(`跳过 ${skipped}`);
+  parts.push(`失败 ${failures.length}`);
+  if (failures.length) parts.push(failures.map(item => `${accountById(item.accountId)?.name || item.accountId}：${item.error}`).join('；'));
+  return parts.join(' · ');
 }
 
 function json(res, code, data) {
@@ -401,12 +454,28 @@ function serve(req, res, pathname) {
 
 function schedule() {
   clearInterval(pollTimer);
-  if (config.enabled) pollTimer = setInterval(() => pollAll().catch(() => {}), config.intervalMinutes * 60000);
+  if (!config.enabled) return logInfo('自动查询已关闭，不再按间隔采样');
+  pollTimer = setInterval(async () => {
+    const startedAt = Date.now();
+    logInfo(`开始自动查询，共 ${accounts.filter(account => account.enabled).length} 个启用账号`);
+    try { logInfo(`自动查询完成（耗时 ${Date.now() - startedAt}ms）：${pollSummary(await pollAll())}`); }
+    catch (error) { logWarn(`自动查询异常：${errorText(error)}`); }
+  }, config.intervalMinutes * 60000);
+  logInfo(`自动查询已开启，每 ${config.intervalMinutes} 分钟一次`);
 }
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   const pathname = url.pathname;
+  const startedAt = Date.now();
+  let logged = false;
+  // 页面每 30 秒轮询 /api/state，成功时静默，避免刷屏；其余请求和所有出错请求都记录。
+  res.on('finish', () => {
+    if (logged || (req.method === 'GET' && res.statusCode < 400)) return;
+    logged = true;
+    const line = `${requestLine(req)} → ${res.statusCode} · ${Date.now() - startedAt}ms`;
+    if (res.statusCode >= 500) logWarn(line); else logInfo(line);
+  });
   try {
     if (req.method === 'GET' && pathname === '/api/session') return json(res, 200, { admin: isAdmin(req), configured: !!ADMIN_PASSWORD });
     if (req.method === 'POST' && pathname === '/api/login') {
@@ -483,29 +552,45 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
 
-    if (req.method === 'POST' && pathname === '/api/poll') return json(res, 200, { results: await pollAll() });
+    if (req.method === 'POST' && pathname === '/api/poll') {
+      logInfo('收到 POST /api/poll 刷新全部请求');
+      const results = await pollAll();
+      logInfo(`POST /api/poll 完成：${pollSummary(results)}`);
+      return json(res, 200, { results });
+    }
     if (req.method === 'POST' && pathname === '/api/config') {
       requireAdmin(req);
       const input = await bodyJson(req);
+      const previous = config;
       config = { ...config, ...input };
       config.enabled = config.enabled !== false;
       config.intervalMinutes = Math.max(1, Math.min(1440, Number(config.intervalMinutes) || 5));
       config.timeoutSeconds = Math.max(1, Math.min(120, Number(config.timeoutSeconds) || 10));
       writeJson(CONFIG_FILE, config);
       schedule();
+      const changes = ['enabled', 'intervalMinutes', 'timeoutSeconds']
+        .filter(key => previous[key] !== config[key])
+        .map(key => `${key}: ${previous[key]} → ${config[key]}`);
+      logInfo(changes.length ? `自动查询设置已更新：${changes.join('，')}` : '自动查询设置已提交，数值无变化');
       return json(res, 200, config);
     }
     return serve(req, res, pathname);
   } catch (error) {
-    json(res, error.statusCode || 500, { error: error.message || '服务器错误', code: error.code || 'INTERNAL_ERROR' });
+    const status = error.statusCode || 500;
+    const text = errorText(error);
+    const code = error.code ? ` [${error.code}]` : '';
+    if (status >= 500) logWarn(`${requestLine(req)} → ${status} · ${text}${code}`);
+    else logInfo(`${requestLine(req)} → ${status} · ${text}${code}`);
+    json(res, status, { error: error.message || '服务器错误', code: error.code || 'INTERNAL_ERROR' });
   }
 });
 
 server.listen(4782, '127.0.0.1', () => {
+  logInfo(`Codex Usage Tracker: http://127.0.0.1:${server.address().port}`);
+  logInfo(`管理员密码${ADMIN_PASSWORD ? '已配置' : '未配置（管理功能将不可用，请设置 CODEX_ADMIN_PASSWORD）'} · 已保存 ${accounts.length} 个账号 · ${snapshots.length} 条快照`);
   schedule();
-  console.log('Codex Usage Tracker: http://127.0.0.1:4782');
+  logInfo('开始首次查询');
   pollAll().then(results => {
-    const failed = results.filter(item => item.error);
-    if (failed.length) console.warn('Initial poll:', failed.map(item => item.error).join('; '));
-  }).catch(error => console.warn('Initial poll:', error.message));
+    logInfo(`首次查询完成：${pollSummary(results)}`);
+  }).catch(error => logWarn(`首次查询异常：${errorText(error)}`));
 });
