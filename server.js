@@ -278,6 +278,9 @@ function saveSnapshots() {
 async function pollAccount(id) {
   const account = accountById(id);
   if (!account) throw new Error('账号不存在');
+  if (!account.enabled) {
+    throw requestError('该账号已暂停查询，请先恢复后再查询', 409, 'ACCOUNT_PAUSED');
+  }
   if (activePolls.has(id)) throw new Error('该账号正在查询，请稍候');
   let requested = false;
   const auth = readAuth(account);

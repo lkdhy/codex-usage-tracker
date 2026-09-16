@@ -68,6 +68,8 @@ select:focus, .form-field input:focus, .form-field textarea:focus { border-color
 .card-actions { gap: 2px; flex: 0 0 auto; }
 .small-button { border: 0; border-radius: 7px; padding: 6px 7px; color: #657386; background: transparent; font-size: 11px; }
 .small-button:hover { background: #f0f4f7; color: var(--green); }
+.small-button.toggle:hover { color: #a87521; background: #fff5de; }
+.small-button.toggle.resume:hover { color: var(--green); background: var(--green-soft); }
 .small-button.danger:hover { color: #b14e4e; background: #fff1f1; }
 .account-error { margin-top: 11px; padding: 8px 10px; border-radius: 8px; color: #a44b4b; background: #fff3f3; font-size: 11px; line-height: 1.5; }
 .empty-accounts { grid-column: 1 / -1; padding: 48px 20px; border: 1px dashed #cfd9e2; border-radius: 16px; background: rgba(255, 255, 255, .7); text-align: center; }

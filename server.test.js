@@ -53,6 +53,15 @@ test('missing credentials are skipped and manual polling does not persist an err
   assert.equal(f.run('accounts[0].lastError'), null);
 });
 
+test('paused accounts retain their history and cannot be polled individually', async t => {
+  const f = fixture(t);
+  addAccount(f);
+  f.run("accounts[0].enabled = false; snapshots.push({ accountId: 'a', capturedAt: '2026-01-01T00:00:00.000Z' });");
+  await assert.rejects(f.run("pollAccount('a')"), { code: 'ACCOUNT_PAUSED', statusCode: 409 });
+  assert.equal(f.run('snapshots.length'), 1);
+  assert.equal(f.run('accounts[0].enabled'), false);
+});
+
 test('retention keeps the latest 20000 records per account in original order', t => {
   const f = fixture(t);
   f.run(`snapshots = Array.from({length: 20003}, (_, i) => [

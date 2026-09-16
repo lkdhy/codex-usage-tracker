@@ -103,7 +103,7 @@ function renderAccounts() {
       <div class="account-meta"><span>${escapeHtml(account.email || '尚未识别账号')}</span><span class="credential-state ${account.credentialsReady ? 'ready' : 'missing'}">${account.credentialsReady ? '凭据已设置 · 本地独立保存' : '尚未设置凭据 · 请编辑账号粘贴 JSON'}</span></div>
       <div class="usage-row"><div><span class="label">${escapeHtml(windowLabel(latest?.primary?.limitWindowSeconds))}</span><strong>${latest?.primary ? `${latest.primary.usedPercent}%` : '—'}</strong></div><div class="usage-reset">${latest?.primary ? escapeHtml(formatReset(latest.primary.resetAfterSeconds)) : '完成查询后显示'}</div></div>
       <div class="usage-bar"><span style="width:${maxWidth}%;background:${color}"></span></div>
-      <div class="account-foot"><span>${latest ? `最后更新 · ${formatAgo(latest.capturedAt)}` : '还没有快照'} · ${account.snapshotCount || 0} 条记录</span><div class="card-actions"><button data-action="poll" class="small-button">查询</button>${state.session.admin ? '<button data-action="edit" class="small-button">编辑</button><button data-action="delete" class="small-button danger">删除</button>' : ''}</div></div>
+      <div class="account-foot"><span>${latest ? `最后更新 · ${formatAgo(latest.capturedAt)}` : '还没有快照'} · ${account.snapshotCount || 0} 条记录</span><div class="card-actions"><button data-action="poll" class="small-button" ${account.enabled ? '' : 'disabled title="该账号已暂停查询"'}>${account.enabled ? '查询' : '已暂停'}</button>${state.session.admin ? `<button data-action="toggle" class="small-button toggle ${account.enabled ? '' : 'resume'}">${account.enabled ? '暂停查询' : '恢复查询'}</button><button data-action="edit" class="small-button">编辑</button><button data-action="delete" class="small-button danger">删除</button>` : ''}</div></div>
       ${account.lastError && account.credentialsReady ? `<div class="account-error">${escapeHtml(account.lastError)}</div>` : ''}
     </article>`;
   }).join('');
@@ -210,9 +210,9 @@ async function refreshAll() {
     await load();
     const failures = (data.results || []).filter(item => item.error);
     const skipped = (data.results || []).filter(item => item.skipped).length;
-    showToast(failures.length ? `${failures.length} 个账号查询失败，请查看卡片提示` : skipped ? `查询完成，跳过 ${skipped} 个未设置凭据的账号` : '全部账号已刷新', failures.length > 0);
+    showToast(failures.length ? `${failures.length} 个启用账号查询失败，请查看卡片提示` : skipped ? `查询完成，跳过 ${skipped} 个未设置凭据的账号` : '启用账号已全部刷新', failures.length > 0);
   } catch (error) { showToast(error.message, true); }
-  finally { button.disabled = false; button.textContent = '刷新全部'; }
+  finally { button.disabled = false; button.textContent = '刷新启用账号'; }
 }
 
 function openDialog(account = null) {
@@ -250,6 +250,22 @@ async function deleteAccount(id) {
   await load(); showToast('账号及其历史已删除');
 }
 
+async function toggleAccount(id) {
+  const account = state.accounts.find(item => item.id === id);
+  if (!account) return;
+  const enabled = !account.enabled;
+  if (!enabled && !confirm(`确定暂停“${account.name}”的查询吗？账号凭据和历史记录会保留。`)) return;
+  const response = await fetch(`/api/accounts/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled })
+  });
+  const data = await response.json();
+  if (!response.ok) return showToast(data.error || (enabled ? '恢复查询失败' : '暂停查询失败'), true);
+  await load();
+  showToast(enabled ? `已恢复“${account.name}”的查询` : `已暂停“${account.name}”的查询`);
+}
+
 async function updateSettings() {
   const current = state.config.enabled ? state.config.intervalMinutes : 0;
   const input = prompt('自动查询间隔（分钟）\n输入 0 可关闭自动查询。建议 5～15 分钟。', String(current));
@@ -277,6 +293,7 @@ $('#accounts').addEventListener('click', event => {
   if (!card) return;
   const id = card.dataset.accountId;
   if (action === 'poll') pollAccount(id);
+  if (action === 'toggle' && state.session.admin) toggleAccount(id);
   if (action === 'edit' && state.session.admin) openDialog(state.accounts.find(account => account.id === id));
   if (action === 'delete' && state.session.admin) deleteAccount(id);
 });
