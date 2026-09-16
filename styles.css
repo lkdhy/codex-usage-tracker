@@ -26,6 +26,7 @@ h3 { margin: 0; font-size: 16px; }
 .button:disabled, .small-button:disabled { cursor: wait; opacity: .55; transform: none; }
 .button.primary { color: #fff; background: var(--green); box-shadow: 0 8px 18px rgba(30, 141, 115, .22); }
 .button.secondary { color: #405064; background: #fff; border-color: var(--line); }
+.button.compact { padding: 8px 11px; border-radius: 9px; font-size: 12px; }
 .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 18px; }
 .summary-card { min-height: 116px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 16px; background: rgba(255, 255, 255, .9); box-shadow: var(--shadow); }
 .summary-card.accent { background: linear-gradient(135deg, #e6f6ef, #fff); }
@@ -43,7 +44,6 @@ select:focus, .form-field input:focus, .form-field textarea:focus { border-color
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #19a974; box-shadow: 0 0 0 4px #19a97418; }
 .dot.offline { background: #c75353; box-shadow: 0 0 0 4px #c7535318; }
 .section-heading { display: flex; justify-content: space-between; align-items: end; margin: 0 2px 13px; }
-.text-button { border: 0; color: var(--green); background: transparent; font-size: 12px; font-weight: 750; }
 .accounts-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; margin-bottom: 27px; }
 .account-card { position: relative; min-width: 0; padding: 19px 20px 16px; border: 1px solid var(--line); border-radius: 16px; background: #fff; box-shadow: var(--shadow); }
 .account-head, .account-foot, .usage-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
