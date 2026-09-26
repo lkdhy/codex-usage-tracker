@@ -116,6 +116,13 @@ function ensureCredentialFile(account) {
 function credentialsReady(account) {
   return !!tokenFromCredentials(readJson(credentialPath(account), null));
 }
+// access_token 通常是 JWT；这里只读取过期时间用于页面提醒，不做签名校验。
+function tokenExpiresAt(token) {
+  try {
+    const { exp } = JSON.parse(Buffer.from(String(token).split('.')[1], 'base64url').toString('utf8'));
+    return Number.isFinite(exp) ? new Date(exp * 1000).toISOString() : null;
+  } catch { return null; }
+}
 
 let config = { ...defaultConfig, ...loadDataFile(CONFIG_FILE, {}, isPlainObject) };
 config.intervalMinutes = Math.max(1, Math.min(1440, Number(config.intervalMinutes) || 5));
@@ -277,16 +284,31 @@ function publicSnapshot(item) {
   const { raw, ...safe } = item;
   return safe;
 }
+// 附加额度（如特定模型的独立限额）只出现在原始响应中；字段不合法的条目直接忽略。
+function additionalLimits(raw) {
+  if (!Array.isArray(raw?.additional_rate_limits)) return [];
+  return raw.additional_rate_limits.flatMap(item => {
+    try {
+      const rl = item?.rate_limit;
+      const primary = normalizeWindow(rl?.primary_window);
+      const secondary = normalizeWindow(rl?.secondary_window);
+      if (!primary && !secondary) return [];
+      return [{ name: String(item.limit_name || item.metered_feature || '附加额度'), limitReached: !!rl.limit_reached, primary, secondary }];
+    } catch { return []; }
+  });
+}
 
 function accountById(id) { return accounts.find(account => account.id === id); }
 
 function accountSummary(account) {
   const history = snapshots.filter(item => item.accountId === account.id);
   const latest = history.at(-1) || null;
+  const token = tokenFromCredentials(readJson(credentialPath(account), null));
   return {
     ...account,
-    credentialsReady: credentialsReady(account),
-    latest: latest ? publicSnapshot(latest) : null,
+    credentialsReady: !!token,
+    credentialsExpiresAt: token ? tokenExpiresAt(token) : null,
+    latest: latest ? { ...publicSnapshot(latest), additional: additionalLimits(latest.raw) } : null,
     snapshotCount: history.length
   };
 }
@@ -377,7 +399,7 @@ async function pollAccount(id) {
       account.lastErrorCode = null;
       saveAccounts();
       saveSnapshots();
-      logInfo(`已记录快照：GET ${USAGE_ENDPOINT} 返回 200 · 使用率 ${item.primary ? `${item.primary.usedPercent}%` : '未知'} · 该账号 ${snapshots.filter(entry => entry.accountId === account.id).length} 条`);
+      logInfo(`已记录快照：GET ${USAGE_ENDPOINT} 返回 200 · 已用额度 ${item.primary ? `${item.primary.usedPercent}%` : '未知'} · 该账号 ${snapshots.filter(entry => entry.accountId === account.id).length} 条`);
       return item;
     } finally {
       clearTimeout(timer);

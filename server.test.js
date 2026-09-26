@@ -294,3 +294,23 @@ test('credential updates keep the remote account binding and change nothing when
   assert.equal(f.run('snapshots.length'), 2);
   assert.equal(f.run('accounts[0].name'), 'B');
 });
+
+test('account summaries expose credential expiry and additional limits of the latest snapshot', t => {
+  const f = fixture(t);
+  const exp = Date.parse('2026-10-04T14:48:00.000Z') / 1000;
+  const jwt = ['header', Buffer.from(JSON.stringify({ exp })).toString('base64url'), 'signature'].join('.');
+  f.run(`accounts.push({ id: 'a', name: 'A', enabled: true }, { id: 'b', name: 'B', enabled: true });
+    saveCredentials(accounts[0], { tokens: { access_token: '${jwt}' } });
+    saveCredentials(accounts[1], { access_token: 'opaque-token' });
+    snapshots.push({ accountId: 'a', capturedAt: '2026-01-01T00:00:00.000Z', raw: { additional_rate_limits: [
+      { limit_name: 'Spark', rate_limit: { limit_reached: false, primary_window: { used_percent: 7, limit_window_seconds: 18000 } } },
+      { limit_name: 'Broken', rate_limit: { primary_window: { used_percent: 'x' } } }
+    ] } });`);
+  const [a, b] = JSON.parse(f.run('JSON.stringify(accounts.map(accountSummary))'));
+  assert.equal(a.credentialsExpiresAt, '2026-10-04T14:48:00.000Z');
+  assert.equal(b.credentialsReady, true);
+  assert.equal(b.credentialsExpiresAt, null);
+  assert.equal(a.latest.raw, undefined);
+  assert.deepEqual(a.latest.additional.map(item => [item.name, item.primary.usedPercent, item.secondary]), [['Spark', 7, null]]);
+  assert.equal(b.latest, null);
+});

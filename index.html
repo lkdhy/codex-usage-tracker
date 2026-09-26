@@ -3,60 +3,126 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Codex 账号用量</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <main class="shell">
     <header class="topbar">
       <div>
-        <div class="eyebrow">OPENAI CODEX · ACCOUNT MONITOR</div>
-        <h1>账号用量</h1>
-        <p class="sub">分账号记录 Codex 订阅额度，切换凭据也不会混淆历史。</p>
+        <h1>Codex 账号用量</h1>
+        <p class="status-line"><span id="connectionDot" class="dot" aria-hidden="true"></span><span id="statusText" aria-live="polite">正在读取…</span></p>
       </div>
       <div class="header-actions">
-        <button id="refreshAll" class="button secondary" title="仅查询当前已启用的账号">刷新启用账号</button>
-        <button id="adminLogin" class="button secondary">管理员登录</button><button id="adminLogout" class="button secondary" hidden>退出管理员</button>
-        <button id="addAccount" class="button primary" data-admin-only hidden>添加账号</button>
+        <button id="refreshAll" class="button" type="button" title="立即查询所有启用的账号">刷新全部</button>
+        <button id="openSettings" class="button" type="button" data-admin-only hidden>自动查询设置</button>
+        <button id="addAccount" class="button primary" type="button" data-admin-only hidden>添加账号</button>
+        <button id="adminLogin" class="button ghost" type="button">管理员登录</button>
+        <button id="adminLogout" class="button ghost" type="button" hidden>退出管理员</button>
       </div>
     </header>
 
-    <section class="summary-grid" aria-label="总览">
-      <article class="summary-card"><span class="summary-label">维护账号</span><strong id="accountCount">0</strong><span class="summary-note">个账号</span></article>
-      <article class="summary-card"><span class="summary-label">正常连接</span><strong id="healthyCount">0</strong><span class="summary-note">个账号可查询</span></article>
-      <article class="summary-card accent"><span class="summary-label">最高使用率</span><strong id="maxUsage">—</strong><span class="summary-note" id="maxUsageName">暂无数据</span></article>
+    <section id="summary" class="summary" aria-label="总览"></section>
+
+    <section class="section" aria-labelledby="accountsTitle">
+      <div class="section-head">
+        <h2 id="accountsTitle">账号</h2>
+        <p id="accountsNote" class="section-note"></p>
+      </div>
+      <div id="accounts" class="accounts"><p class="placeholder">正在读取账号…</p></div>
     </section>
 
-    <section class="toolbar panel">
-      <div class="field"><label for="range">历史范围</label><select id="range"><option value="1" selected>最近 24 小时</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="all">全部</option></select></div>
-      <div class="field"><label for="accountFilter">图表账号</label><select id="accountFilter"><option value="all">全部账号</option></select></div>
-      <div class="field"><label for="chartScale">纵轴范围</label><select id="chartScale"><option value="adaptive" selected>自适应</option><option value="full">完整 0%～100%</option></select></div>
-      <div class="connection"><span id="connectionDot" class="dot"></span><span id="statusText">正在读取…</span></div>
+    <section class="section" aria-labelledby="chartTitle">
+      <div class="section-head">
+        <h2 id="chartTitle">已用额度变化</h2>
+        <p id="chartNote" class="section-note">主额度窗口的已用比例</p>
+      </div>
+      <div class="filters">
+        <div id="rangeControl" class="segmented" role="group" aria-label="时间范围">
+          <button type="button" data-range="1">24 小时</button>
+          <button type="button" data-range="7">7 天</button>
+          <button type="button" data-range="30">30 天</button>
+          <button type="button" data-range="all">全部</button>
+        </div>
+        <div id="scaleControl" class="segmented" role="group" aria-label="纵轴范围">
+          <button type="button" data-scale="adaptive">自适应</button>
+          <button type="button" data-scale="full">0–100%</button>
+        </div>
+        <button id="tableToggle" class="button small" type="button" aria-pressed="false">显示表格</button>
+      </div>
+      <figure id="chartCard" class="chart-card">
+        <div id="legend" class="legend" role="group" aria-label="图例：点击显示或隐藏账号" hidden></div>
+        <div id="chart" class="chart" tabindex="0" role="img" aria-label="已用额度变化图">
+          <svg id="chartSvg" aria-hidden="true"></svg>
+          <div id="chartTip" class="chart-tip" hidden></div>
+          <p id="chartEmpty" class="chart-empty" hidden></p>
+        </div>
+        <div id="chartTable" class="chart-table" hidden></div>
+        <figcaption id="chartCaption" class="chart-caption"></figcaption>
+      </figure>
     </section>
 
-    <section class="section-heading"><div><h2>账号</h2><p>每个账号使用独立凭据和历史快照。</p></div><button id="settings" class="button secondary compact" data-admin-only hidden>设置自动查询</button></section>
-    <section id="accounts" class="accounts-grid"></section>
-
-    <section class="chart-card panel">
-      <div class="chart-head"><div><h2>使用变化</h2><p>记录点：<span id="count">0</span> · 账户窗口使用率</p></div><div id="legend" class="legend"></div></div>
-      <div id="chart" class="chart"><div class="empty">添加账号并完成第一次查询后，这里会显示历史曲线。</div></div>
-    </section>
-
-    <footer><span>数据仅保存在本机 <code>data/accounts.json</code> 与 <code>data/snapshots.json</code></span><span>自动查询：<b id="autoState">开启</b></span></footer>
+    <footer class="footer">数据保存在本机 <code>data/</code> 目录 · 页面每 30 秒自动同步一次</footer>
   </main>
 
-  <dialog id="accountDialog" class="dialog">
-    <form id="accountForm" method="dialog">
-      <div class="dialog-head"><div><span class="eyebrow">ACCOUNT PROFILE</span><h2 id="dialogTitle">添加账号</h2></div><button type="button" id="closeDialog" class="icon-button" aria-label="关闭">×</button></div>
+  <dialog id="accountDialog" class="dialog" aria-labelledby="accountDialogTitle">
+    <form id="accountForm" novalidate>
+      <header class="dialog-head">
+        <h2 id="accountDialogTitle">添加账号</h2>
+        <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
+      </header>
       <input type="hidden" id="accountId">
-      <label class="form-field"><span>账号名称</span><input id="accountName" required maxlength="80" placeholder="例如：个人 Pro、工作账号"></label>
-      <label class="form-field"><span>auth.json JSON 内容</span><textarea id="credentials" placeholder="粘贴该账号 auth.json 的完整 JSON 内容"></textarea></label>
-      <p class="form-help">凭据会由本地后端按账号单独保存，网页不会展示或回填 token。编辑已有账号时留空表示保留原凭据。</p>
-      <label class="switch-row"><input type="checkbox" id="accountEnabled" checked><span>参与自动查询</span></label>
-      <div class="dialog-actions"><button type="button" id="cancelDialog" class="button secondary">取消</button><button type="submit" class="button primary">保存账号</button></div>
+      <label class="field"><span>账号名称</span><input id="accountName" maxlength="80" autocomplete="off" placeholder="例如：个人 Pro、工作账号"></label>
+      <label class="field"><span>auth.json 内容</span><textarea id="credentials" rows="7" spellcheck="false" autocomplete="off"></textarea></label>
+      <p id="credentialsStatus" class="field-help" hidden></p>
+      <p class="field-help">通常位于 <code>~/.codex/auth.json</code>（Windows 为 <code>%USERPROFILE%\.codex\auth.json</code>）。凭据只保存在本机后端，页面不会回显。</p>
+      <label class="check"><input type="checkbox" id="accountEnabled"><span>启用查询</span></label>
+      <p class="field-help">暂停后既不参与自动查询，也不能手动查询；凭据和历史会保留。</p>
+      <p id="accountError" class="form-error" role="alert" hidden></p>
+      <footer class="dialog-actions">
+        <button type="button" class="button" data-close>取消</button>
+        <button type="submit" id="accountSubmit" class="button primary">保存</button>
+      </footer>
     </form>
   </dialog>
 
+  <dialog id="loginDialog" class="dialog narrow" aria-labelledby="loginTitle">
+    <form id="loginForm" novalidate>
+      <header class="dialog-head">
+        <h2 id="loginTitle">管理员登录</h2>
+        <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
+      </header>
+      <p id="loginUnconfigured" class="notice" hidden>服务端没有设置管理员密码，管理功能不可用。请设置环境变量 <code>CODEX_ADMIN_PASSWORD</code> 后重启服务。</p>
+      <label class="field"><span>管理员密码</span><input id="loginPassword" type="password" autocomplete="current-password"></label>
+      <p id="loginError" class="form-error" role="alert" hidden></p>
+      <footer class="dialog-actions">
+        <button type="button" class="button" data-close>取消</button>
+        <button type="submit" id="loginSubmit" class="button primary">登录</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="settingsDialog" class="dialog narrow" aria-labelledby="settingsTitle">
+    <form id="settingsForm" novalidate>
+      <header class="dialog-head">
+        <h2 id="settingsTitle">自动查询设置</h2>
+        <button type="button" class="icon-button" data-close aria-label="关闭">×</button>
+      </header>
+      <label class="check"><input type="checkbox" id="settingsEnabled"><span>开启自动查询</span></label>
+      <label class="field"><span>查询间隔（分钟）</span><input id="settingsInterval" type="number" min="1" max="1440" step="1" inputmode="numeric"></label>
+      <p class="field-help">1～1440 分钟，建议 5～15 分钟；间隔太短可能触发接口限流。</p>
+      <label class="field"><span>单次请求超时（秒）</span><input id="settingsTimeout" type="number" min="1" max="120" step="1" inputmode="numeric"></label>
+      <p id="settingsError" class="form-error" role="alert" hidden></p>
+      <footer class="dialog-actions">
+        <button type="button" class="button" data-close>取消</button>
+        <button type="submit" id="settingsSubmit" class="button primary">保存</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="app.js"></script>
 </body>
 </html>
