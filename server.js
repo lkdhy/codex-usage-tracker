@@ -8,7 +8,9 @@ const DATA_DIR = path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'snapshots.json');
 const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const META_FILE = path.join(DATA_DIR, 'meta.json');
 const ACCOUNT_DATA_DIR = path.join(DATA_DIR, 'accounts');
+const SCHEMA_VERSION = 2;
 const MAX_SNAPSHOTS_PER_ACCOUNT = 20000;
 const MAX_BODY_BYTES = 1024 * 1024;
 const USAGE_ENDPOINT = 'https://chatgpt.com/backend-api/wham/usage';
@@ -21,6 +23,19 @@ fs.mkdirSync(ACCOUNT_DATA_DIR, { recursive: true });
 const defaultConfig = { enabled: true, intervalMinutes: 5, timeoutSeconds: 10 };
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+function isPlainObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
+// 启动数据只在文件不存在时使用默认值；损坏或无法读取时拒绝启动，以免随后的写入用空数据覆盖原有数据。
+function loadDataFile(file, fallback, isValid) {
+  const refuse = reason => new Error(`${path.relative(ROOT, file)}：${reason}，为避免覆盖原有数据已停止启动；请修复或从备份恢复该文件后重试`);
+  let value;
+  try { value = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') return fallback;
+    throw refuse(`无法读取或不是有效 JSON（${error.message}）`);
+  }
+  if (!isValid(value)) throw refuse('内容结构不正确');
+  return value;
 }
 function writeJson(file, value) {
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
@@ -69,8 +84,13 @@ function requestLine(req) {
   catch { pathname = pathname.split(/[?#]/)[0]; }
   return `${req.method} ${pathname}`;
 }
+function requestUrl(req) {
+  try { return new URL(req.url, 'http://127.0.0.1'); }
+  catch { throw requestError('请求地址无效', 400, 'INVALID_URL'); }
+}
 function credentialPath(account) { return path.join(ACCOUNT_DATA_DIR, `${account.id}.json`); }
 function tokenFromCredentials(value) { return value?.access_token || value?.tokens?.access_token; }
+function accountIdFromCredentials(value) { return value?.account_id || value?.tokens?.account_id; }
 function parseCredentials(input) {
   let value = input;
   if (typeof input === 'string') {
@@ -97,10 +117,10 @@ function credentialsReady(account) {
   return !!tokenFromCredentials(readJson(credentialPath(account), null));
 }
 
-let config = { ...defaultConfig, ...readJson(CONFIG_FILE, {}) };
+let config = { ...defaultConfig, ...loadDataFile(CONFIG_FILE, {}, isPlainObject) };
 config.intervalMinutes = Math.max(1, Math.min(1440, Number(config.intervalMinutes) || 5));
-let accounts = Array.isArray(readJson(ACCOUNTS_FILE, null)) ? readJson(ACCOUNTS_FILE, []) : [];
-let snapshots = Array.isArray(readJson(DATA_FILE, [])) ? readJson(DATA_FILE, []) : [];
+let accounts = loadDataFile(ACCOUNTS_FILE, [], Array.isArray);
+let snapshots = loadDataFile(DATA_FILE, [], Array.isArray);
 let pollTimer;
 const activePolls = new Set();
 
@@ -128,7 +148,8 @@ function safeEqualText(a, b) {
 
 function migrateLegacyData() {
   let changed = false;
-  if (!accounts.length && snapshots.length) {
+  const legacy = !accounts.length && snapshots.length > 0;
+  if (legacy) {
     const id = newId();
     const first = snapshots.find(x => x.raw?.account_id || x.accountId);
     accounts = [{
@@ -145,7 +166,7 @@ function migrateLegacyData() {
     changed = true;
   }
   if (accounts.length) {
-    accounts = accounts.map(account => ({
+    const normalized = accounts.map(account => ({
       id: account.id || newId(),
       name: account.name || '未命名账号',
       enabled: account.enabled !== false,
@@ -156,15 +177,17 @@ function migrateLegacyData() {
       lastError: account.lastError || null,
       lastErrorCode: account.lastErrorCode || null
     }));
-    changed = true;
+    if (JSON.stringify(normalized) !== JSON.stringify(accounts)) {
+      accounts = normalized;
+      changed = true;
+    }
   }
   if (changed) {
     accounts.forEach(ensureCredentialFile);
     writeJson(ACCOUNTS_FILE, accounts);
-    writeJson(DATA_FILE, snapshots);
+    if (legacy) writeJson(DATA_FILE, snapshots);
   }
 }
-migrateLegacyData();
 
 function splitMixedLegacySnapshots() {
   if (accounts.length !== 1 || snapshots.length === 0) return;
@@ -201,13 +224,17 @@ function splitMixedLegacySnapshots() {
   writeJson(ACCOUNTS_FILE, accounts);
   writeJson(DATA_FILE, snapshots);
 }
-splitMixedLegacySnapshots();
+// 旧版数据的迁移和拆分只执行一次，由 meta.json 记录；之后启动不再重写数据文件，也不会再拆分账号。
+const meta = loadDataFile(META_FILE, {}, isPlainObject);
+if (!(meta.schemaVersion >= SCHEMA_VERSION)) {
+  migrateLegacyData();
+  splitMixedLegacySnapshots();
+  writeJson(META_FILE, { schemaVersion: SCHEMA_VERSION });
+}
 
 function readAuth(account) {
   const value = readJson(credentialPath(account), {});
-  const token = tokenFromCredentials(value);
-  const authAccount = value.account_id || (value.tokens && value.tokens.account_id);
-  return { token, account: authAccount };
+  return { token: tokenFromCredentials(value), account: accountIdFromCredentials(value) };
 }
 
 function normalizeWindow(x) {
@@ -277,11 +304,11 @@ function saveSnapshots() {
 
 async function pollAccount(id) {
   const account = accountById(id);
-  if (!account) throw new Error('账号不存在');
+  if (!account) throw requestError('账号不存在', 404, 'ACCOUNT_NOT_FOUND');
   if (!account.enabled) {
     throw requestError('该账号已暂停查询，请先恢复后再查询', 409, 'ACCOUNT_PAUSED');
   }
-  if (activePolls.has(id)) throw new Error('该账号正在查询，请稍候');
+  if (activePolls.has(id)) throw requestError('该账号正在查询，请稍候', 409, 'POLL_IN_PROGRESS');
   let requested = false;
   const auth = readAuth(account);
   if (!auth.token) {
@@ -335,6 +362,8 @@ async function pollAccount(id) {
       try { raw = JSON.parse(body); }
       catch { throw requestError(`用量接口返回的不是有效 JSON（响应 ${body.length} 字节，可能为登录页或接口已变化）`, 502, 'UPSTREAM_FORMAT'); }
       const item = normalize(raw, account);
+      // 请求期间账号可能已被删除，此时不能再把结果写回。
+      if (accountById(id) !== account) throw requestError('账号已在查询期间被删除，本次结果未保存', 404, 'ACCOUNT_NOT_FOUND');
       const remoteAccountId = raw.account_id || auth.account || null;
       if (account.remoteAccountId && remoteAccountId && account.remoteAccountId !== remoteAccountId) {
         // 不提升为 requestError：保持该分支原有的 HTTP 500 行为不变，只调整日志措辞。
@@ -467,9 +496,7 @@ function schedule() {
   logInfo(`自动查询已开启，每 ${config.intervalMinutes} 分钟一次`);
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://127.0.0.1');
-  const pathname = url.pathname;
+async function handleRequest(req, res) {
   const startedAt = Date.now();
   let logged = false;
   // 页面每 30 秒轮询 /api/state，成功时静默，避免刷屏；其余请求和所有出错请求都记录。
@@ -480,6 +507,8 @@ const server = http.createServer(async (req, res) => {
     if (res.statusCode >= 500) logWarn(line); else logInfo(line);
   });
   try {
+    const url = requestUrl(req);
+    const pathname = url.pathname;
     if (req.method === 'GET' && pathname === '/api/session') return json(res, 200, { admin: isAdmin(req), configured: !!ADMIN_PASSWORD });
     if (req.method === 'POST' && pathname === '/api/login') {
       const input = await bodyJson(req);
@@ -526,18 +555,26 @@ const server = http.createServer(async (req, res) => {
       const account = accountById(decodeURIComponent(accountMatch[1]));
       if (!account) return json(res, 404, { error: '账号不存在' });
       const input = await bodyJson(req);
-      if (input.name !== undefined) {
-        const name = String(input.name).trim();
-        if (!name) return json(res, 400, { error: '账号名称不能为空' });
-        account.name = name.slice(0, 80);
+      // 先完成全部校验再修改账号，避免请求被拒绝时仍有部分字段生效。
+      const name = input.name === undefined ? undefined : String(input.name).trim();
+      if (name === '') return json(res, 400, { error: '账号名称不能为空' });
+      let credentials;
+      if (typeof input.credentials === 'string' && input.credentials.trim()) {
+        try { credentials = parseCredentials(input.credentials); } catch (error) { return json(res, 400, { error: error.message }); }
+        // 新旧凭据的 account_id 不同说明换成了另一个账号，继续记录会混淆历史，应新建账号；
+        // 缺少 account_id 时无法预先判断，交给查询时的远程账号校验。
+        const previous = readAuth(account).account;
+        const next = accountIdFromCredentials(credentials);
+        if (previous && next && previous !== next) {
+          return json(res, 409, { error: '新凭据属于另一个 ChatGPT 账号，为避免混淆历史未保存；如需记录该账号，请新建账号', code: 'ACCOUNT_MISMATCH' });
+        }
       }
-      if (input.credentials !== undefined && input.credentials.trim?.()) {
-        try { saveCredentials(account, input.credentials); } catch (error) { return json(res, 400, { error: error.message }); }
-        account.remoteAccountId = null;
-        account.email = null;
+      if (credentials) {
+        saveCredentials(account, credentials);
         account.lastError = null;
         account.lastErrorCode = null;
       }
+      if (name !== undefined) account.name = name.slice(0, 80);
       if (input.enabled !== undefined) account.enabled = input.enabled !== false;
       saveAccounts();
       return json(res, 200, accountSummary(account));
@@ -586,6 +623,14 @@ const server = http.createServer(async (req, res) => {
     else logInfo(`${requestLine(req)} → ${status} · ${text}${code}`);
     json(res, status, { error: error.message || '服务器错误', code: error.code || 'INTERNAL_ERROR' });
   }
+}
+// 兜底：handleRequest 内的异常本应都被 try/catch 接住；万一漏网也只结束当前请求，不能让进程退出。
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch(error => {
+    logWarn(`${requestLine(req)} → 未处理的异常 · ${errorText(error)}`);
+    if (res.headersSent) res.end();
+    else json(res, 500, { error: '服务器错误', code: 'INTERNAL_ERROR' });
+  });
 });
 
 server.listen(4782, '127.0.0.1', () => {

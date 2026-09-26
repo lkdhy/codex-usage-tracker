@@ -5,11 +5,18 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const http = require('node:http');
+const net = require('node:net');
 const source = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
-function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-tracker-test-'));
+// `root` reuses an existing directory to simulate a restart; `prepare` writes data files before server.js loads.
+function fixture(t, { root = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-tracker-test-')), prepare } = {}) {
   let server;
+  t.after(async () => {
+    server?.closeAllConnections();
+    if (server?.listening) await new Promise(resolve => server.close(resolve));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  prepare?.(root);
   const context = vm.createContext({
     __dirname: root, console, Buffer, URL, AbortController, setTimeout, clearTimeout,
     setInterval, clearInterval, process: { env: { CODEX_ADMIN_PASSWORD: 'test-admin' } },
@@ -23,11 +30,6 @@ function fixture(t) {
     } : require(name)
   });
   vm.runInContext(source, context);
-  t.after(async () => {
-    server.closeAllConnections();
-    if (server.listening) await new Promise(resolve => server.close(resolve));
-    fs.rmSync(root, { recursive: true, force: true });
-  });
   return {
     root, context,
     run: code => vm.runInContext(code, context),
@@ -41,6 +43,19 @@ function fixture(t) {
 function addAccount(f, credentials = true) {
   f.run(`accounts.push({ id: 'a', name: 'A', enabled: true, lastError: '旧错误' });
     ${credentials ? "saveCredentials(accounts[0], { access_token: 'test-only' });" : ''}`);
+}
+
+function writeData(root, name, text) {
+  fs.mkdirSync(path.join(root, 'data'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'data', name), text);
+}
+function readData(root, name) { return fs.readFileSync(path.join(root, 'data', name), 'utf8'); }
+
+async function login(base) {
+  const response = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'test-admin' }) });
+  assert.equal(response.status, 200);
+  await response.text();
+  return response.headers.get('set-cookie').split(';')[0];
 }
 
 test('missing credentials are skipped and manual polling does not persist an error', async t => {
@@ -99,24 +114,26 @@ test('atomic replacement preserves old JSON when rename fails and removes tempor
 test('HTTP rejects oversized fixed and chunked bodies and invalid JSON without mutation', async t => {
   const f = fixture(t);
   const base = await f.start();
-  for (const [body, status] of [['x'.repeat(1024 * 1024 + 1), 403], ['{', 403], ['null', 403]]) {
-    const response = await fetch(`${base}/api/config`, { method: 'POST', body });
+  const anonymous = await fetch(`${base}/api/config`, { method: 'POST', body: '{}' });
+  assert.equal(anonymous.status, 403);
+  await anonymous.text();
+  // Log in first: without a session requireAdmin answers 403 before the body is ever read.
+  const cookie = await login(base);
+  for (const [body, status] of [['x'.repeat(1024 * 1024 + 1), 413], ['{', 400], ['null', 400]]) {
+    const response = await fetch(`${base}/api/config`, { method: 'POST', headers: { cookie }, body });
     assert.equal(response.status, status);
     await response.text();
   }
   const status = await new Promise((resolve, reject) => {
-    const req = http.request(`${base}/api/config`, { method: 'POST' }, res => {
+    const req = http.request(`${base}/api/config`, { method: 'POST', headers: { cookie } }, res => {
       res.resume(); res.on('end', () => resolve(res.statusCode));
     });
     req.on('error', reject);
     for (let i = 0; i < 17; i++) req.write(Buffer.alloc(65536, 120));
     req.end();
   });
-  assert.equal(status, 403);
+  assert.equal(status, 413);
   assert.equal(fs.existsSync(path.join(f.root, 'data/config.json')), false);
-  const login = await fetch(`${base}/api/login`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ password: 'test-admin' }) });
-  assert.equal(login.status, 200);
-  const cookie = login.headers.get('set-cookie').split(';')[0];
   const good = await fetch(`${base}/api/config`, {
     method: 'POST', headers: { cookie }, body: JSON.stringify({ enabled: false, intervalMinutes: 6 })
   });
@@ -158,4 +175,122 @@ test('upstream failures are classified and never stored as snapshots', async t =
   assert.equal(f.run('snapshots.length'), 2);
   assert.equal(f.run('accounts[0].lastError'), null);
   assert.equal(f.run('accounts[0].lastErrorCode'), null);
+});
+
+test('malformed request URLs get 400 without taking the server down', async t => {
+  const f = fixture(t);
+  const base = await f.start();
+  const reply = await new Promise((resolve, reject) => {
+    const socket = net.connect(Number(new URL(base).port), '127.0.0.1', () => {
+      socket.write('GET // HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n');
+    });
+    let data = '';
+    socket.setEncoding('utf8');
+    socket.setTimeout(2000, () => socket.destroy(new Error('no response to GET //')));
+    socket.on('data', chunk => { data += chunk; });
+    socket.on('end', () => resolve(data));
+    socket.on('error', reject);
+  });
+  assert.match(reply, /^HTTP\/1\.1 400 /);
+  assert.equal((await fetch(`${base}/api/session`)).status, 200);
+});
+
+test('unreadable data files stop startup instead of being replaced with empty data', t => {
+  for (const [name, text, message] of [
+    ['snapshots.json', '[{"accountId":"a"', /snapshots\.json/],
+    ['accounts.json', '{}', /accounts\.json/]
+  ]) {
+    let root;
+    assert.throws(() => fixture(t, { prepare(dir) {
+      root = dir;
+      writeData(dir, 'accounts.json', '[{"id":"a","name":"A"}]');
+      writeData(dir, 'snapshots.json', '[]');
+      writeData(dir, name, text);
+    } }), message);
+    assert.equal(readData(root, name), text);
+  }
+});
+
+test('legacy data is migrated once and later restarts neither rewrite nor split accounts', t => {
+  const f = fixture(t, { prepare: root => writeData(root, 'snapshots.json', JSON.stringify([
+    { capturedAt: '2026-01-01T00:00:00.000Z', raw: { account_id: 'remote-X' } },
+    { capturedAt: '2026-01-02T00:00:00.000Z', raw: { account_id: 'remote-Y' } }
+  ])) });
+  assert.equal(f.run("accounts.map(account => account.name).join('|')"), '默认账号（历史）|默认账号（当前）');
+  assert.equal(JSON.parse(readData(f.root, 'meta.json')).schemaVersion, 2);
+  // One account whose history spans two remote accounts must survive a restart untouched.
+  const accounts = JSON.stringify([{ id: 'a', name: 'A', enabled: true }]);
+  const snapshots = JSON.stringify([
+    { accountId: 'a', remoteAccountId: 'remote-X', capturedAt: '2026-01-01T00:00:00.000Z' },
+    { accountId: 'a', remoteAccountId: 'remote-Y', capturedAt: '2026-01-02T00:00:00.000Z' }
+  ]);
+  writeData(f.root, 'accounts.json', accounts);
+  writeData(f.root, 'snapshots.json', snapshots);
+  const restarted = fixture(t, { root: f.root });
+  assert.equal(restarted.run('accounts.length'), 1);
+  assert.equal(readData(f.root, 'accounts.json'), accounts);
+  assert.equal(readData(f.root, 'snapshots.json'), snapshots);
+});
+
+test('in-flight polls reject duplicates and never write back after the account is deleted', async t => {
+  const f = fixture(t);
+  addAccount(f);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  f.context.fetch = async () => {
+    await gate;
+    return new Response(JSON.stringify({ rate_limit: { primary_window: { used_percent: 1 } } }));
+  };
+  const base = await f.start();
+  const cookie = await login(base);
+  const inflight = f.run("pollAccount('a')");
+  const duplicate = await fetch(`${base}/api/accounts/a/poll`, { method: 'POST' });
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json()).code, 'POLL_IN_PROGRESS');
+  const removed = await fetch(`${base}/api/accounts/a`, { method: 'DELETE', headers: { cookie } });
+  assert.equal(removed.status, 200);
+  await removed.text();
+  release();
+  await assert.rejects(inflight, { code: 'ACCOUNT_NOT_FOUND' });
+  assert.equal(f.run('snapshots.length'), 0);
+  assert.equal(readData(f.root, 'snapshots.json'), '[]');
+  const missing = await fetch(`${base}/api/accounts/a/poll`, { method: 'POST' });
+  assert.equal(missing.status, 404);
+  await missing.text();
+});
+
+test('credential updates keep the remote account binding and change nothing when rejected', async t => {
+  const f = fixture(t);
+  f.run("accounts.push({ id: 'a', name: 'A', enabled: true }); saveCredentials(accounts[0], { tokens: { access_token: 'x1', account_id: 'remote-X' } });");
+  // Tokens starting with "x" belong to remote-X upstream; any other token belongs to remote-Y.
+  f.context.fetch = async (_, { headers }) => new Response(JSON.stringify({
+    account_id: headers.Authorization.startsWith('Bearer x') ? 'remote-X' : 'remote-Y',
+    rate_limit: { primary_window: { used_percent: 1 } }
+  }));
+  await f.run("pollAccount('a')");
+  const base = await f.start();
+  const cookie = await login(base);
+  const patch = async body => {
+    const response = await fetch(`${base}/api/accounts/a`, { method: 'PATCH', headers: { cookie }, body: JSON.stringify(body) });
+    return { status: response.status, body: await response.json() };
+  };
+
+  assert.equal((await patch({ name: 'B', credentials: 'not json' })).status, 400);
+  assert.equal(f.run('accounts[0].name'), 'A');
+
+  const other = await patch({ credentials: JSON.stringify({ tokens: { access_token: 'y1', account_id: 'remote-Y' } }) });
+  assert.equal(other.status, 409);
+  assert.equal(other.body.code, 'ACCOUNT_MISMATCH');
+  assert.equal(f.run('readAuth(accounts[0]).token'), 'x1');
+
+  // Without an account_id the swap only shows up upstream, where the kept binding still rejects it.
+  assert.equal((await patch({ credentials: JSON.stringify({ access_token: 'y1' }) })).status, 200);
+  await assert.rejects(f.run("pollAccount('a')"), /账号已变化/);
+  assert.equal(f.run('accounts[0].remoteAccountId'), 'remote-X');
+  assert.equal(f.run('snapshots.length'), 1);
+
+  assert.equal((await patch({ name: 'B', credentials: JSON.stringify({ tokens: { access_token: 'x2', account_id: 'remote-X' } }) })).status, 200);
+  await f.run("pollAccount('a')");
+  assert.equal(f.run('snapshots.length'), 2);
+  assert.equal(f.run('accounts[0].name'), 'B');
 });
