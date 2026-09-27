@@ -205,7 +205,11 @@ h3 { margin: 0; font-size: 15px; font-weight: 650; }
 .chart-table tbody th { font-weight: 500; }
 .table-empty { margin: 0; padding: 24px; color: var(--ink-2); text-align: center; }
 
-.footer { color: var(--ink-2); font-size: 12px; }
+.footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; color: var(--ink-2); font-size: 12px; }
+.repo-link { display: inline-flex; align-items: center; gap: 7px; flex: none; min-height: 32px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--ink-2); text-decoration: none; font-weight: 600; transition: color .2s, background .2s, border-color .2s; }
+.repo-link:hover, .repo-link:focus-visible { color: var(--ink); background: var(--surface); border-color: var(--axis); }
+.repo-link svg { flex: none; }
+.repo-link-arrow { color: var(--muted); }
 
 /* 对话框 */
 .dialog { width: min(520px, calc(100vw - 24px)); max-height: calc(100vh - 24px); padding: 0; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--ink); box-shadow: 0 24px 64px rgba(0, 0, 0, .25); }
